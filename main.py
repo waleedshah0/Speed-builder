@@ -19,7 +19,8 @@ from typing import Any, Dict
 from database import engine, get_db, Base
 from models import User
 from schemas import UserResponse
-from mapper import map_fields_with_ai, validate_mapped_payload
+from mapper import map_fields_with_ai, validate_mapped_payload, VALID_SCHEMA
+from java_generator import generate_insert_java
 
 # Bootstrap
 Base.metadata.create_all(bind=engine)
@@ -38,8 +39,8 @@ app = FastAPI(
 
 @app.post("/api/submit-entry", response_model=UserResponse)
 def submit_entry(
-    payload: Dict[str, Any],
-    db: Session = Depends(get_db),
+  payload: Dict[str, Any],
+  db: Session = Depends(get_db),
 ):
     """
     Main entry-point.
@@ -80,43 +81,21 @@ def submit_entry(
             ).model_dump(),
         )
 
-    existing_email = (
-        db.query(User).filter(User.Email == mapped["Email"]).first()
-    )
-    if existing_email:
-        raise HTTPException(
-            status_code=409,
-            detail=f"A user with Email '{mapped['Email']}' already exists.",
-        )
-
-    existing_id = (
-        db.query(User).filter(User.National_ID == mapped["National_ID"]).first()
-    )
-    if existing_id:
-        raise HTTPException(
-            status_code=409,
-            detail=f"A user with National_ID '{mapped['National_ID']}' already exists.",
-        )
-
-    new_user = User(
-        Name          = mapped["Name"],
-        Email         = mapped["Email"],
-        Phone_Number  = mapped["Phone_Number"],
-        Address       = mapped["Address"],
-        National_ID   = mapped["National_ID"],
-        Date_of_Birth = mapped["Date_of_Birth"],
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    # Instead of saving to the DB, generate a Java source file that will
+    # perform the INSERT for this mapped payload. The LLM will use the
+    # canonical schema so it understands the table columns and types.
+    try:
+      java_path, java_src = generate_insert_java(mapped, VALID_SCHEMA, table_name=User.__tablename__)
+    except Exception as exc:
+      raise HTTPException(status_code=502, detail=f"Java generation failed: {exc}")
 
     return UserResponse(
-        success=True,
-        message="Entry successfully mapped and saved.",
-        original_payload=payload,
-        mapped_payload=mapped,
-        saved_record=new_user.to_dict(),
-        unmatched_fields=unmatched if unmatched else None,
+      success=True,
+      message=("Entry successfully mapped. A Java insert file was generated: " + java_path),
+      original_payload=payload,
+      mapped_payload=mapped,
+      saved_record={"java_file": java_path},
+      unmatched_fields=unmatched if unmatched else None,
     )
 
 
